@@ -1,1 +1,1 @@
-emqx-exporter
+docker run --rm -ti --name emqx-exporter  registry.cn-hangzhou.aliyuncs.com/seam/emqx-exporter:1.0.0 
