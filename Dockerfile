@@ -2,4 +2,5 @@ FROM python:3
 WORKDIR /app
 ADD . /app
 RUN pip install -r requirements.txt
-CMD ["python","/app/emqx-exporter.py"]
+ENTRYPOINT  ["python","/app/emqx-exporter.py"]
+CMD [""]
