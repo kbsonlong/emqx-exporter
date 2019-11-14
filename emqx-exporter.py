@@ -10,7 +10,9 @@
 import requests
 import argparse
 import socket
+import sys
 import prometheus_client
+from requests.exceptions import ConnectionError
 from prometheus_client.core import CollectorRegistry
 from prometheus_client import Gauge
 from flask import Response, Flask
@@ -25,19 +27,26 @@ class Emq_Api(object):
         self.session = requests.Session()
 
 
+
     def get_info(self,info):
-        response = self.session.get(self.__url + "/api/v3/{}".format(info), auth=(self.__username, self.__password))
-        return response.json()["data"]
+
+        try:
+            response = self.session.get(
+                self.__url + "/api/v3/{}".format(info), auth=(self.__username, self.__password),
+                                        timeout=10).json()
+        except ConnectionError:
+            response = {"code":500,"data":"请求超时，请检查服务url、appid和app秘钥"}
+        return response
 
 
     def aggre_group(self):
         stats = self.get_info('stats')
         metrics = self.get_info('metrics')
         nodes = []
-        for stat in stats:
-            for metric in metrics:
+        for stat in stats["data"]:
+            for metric in metrics["data"]:
                 if stat["node"] == metric["node"]:
-                    node = self.get_info("nodes/{}".format(stat["node"]))
+                    node = self.get_info("nodes/{}".format(stat["node"]))["data"]
                     if node["node_status"] == "Running":
                         node_status = 0
                     else:
@@ -60,23 +69,27 @@ class Emq_Api(object):
                     nodes.append(new_metrics)
         return nodes
 
+
 app = Flask(__name__)
+
 
 @app.route("/metrics")
 def collection_metrics():
     hostname = socket.gethostname()
     ip = socket.gethostbyname(hostname)
+
     metrics = emq.aggre_group()
     for item in metrics:
         names = locals()
-        for k,v in item.items():
+        for k, v in item.items():
             name = k.replace('/', '_')
-            if  not names.get(name):
-                names[name] = Gauge(name, 'node', ['name', 'instance','hostname','job'], registry=REGISTRY)
+            if not names.get(name):
+                names[name] = Gauge(name, 'node', ['name', 'instance', 'hostname', 'job'], registry=REGISTRY)
             else:
                 names[name] = names.get(name)
             if k != "node":
-                names[name].labels(name=name, instance=item["node"],hostname=hostname,job="{}:{}".format(ip,args.port)).inc(v)
+                names[name].labels(name=name, instance=item["node"], hostname=hostname,
+                                   job="{}:{}".format(ip, args.port)).inc(v)
     return Response(prometheus_client.generate_latest(REGISTRY),
                     mimetype="text/plain")
 
@@ -91,7 +104,7 @@ def index():
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="EMQX exporter")
     parser.add_argument('--verbose', '-v', action='store_true', help='verbose mode')
-    parser.add_argument('--config', '-c', default="config.yaml" , help="配置文件")
+    # parser.add_argument('--config', '-c', default="config.yaml" , help="配置文件")
     parser.add_argument('--host', default="127.0.0.1",  help="服务监听地址")
     parser.add_argument('--port', '-p', default=5001,  help="服务监听端口")
     parser.add_argument('--debug', '-d', default=False,  help="开启debug模式,默认关闭")
@@ -113,7 +126,13 @@ if __name__ == "__main__":
         parser.add_argument('--app_secret', default="public", help="App秘钥,默认public")
 
     args = parser.parse_args()
-    emq = Emq_Api(args.emqx_url, args.appid, args.app_secret)
+
 
     REGISTRY = CollectorRegistry(auto_describe=False)
-    app.run(host=args.host,debug=args.debug,port=args.port)
+    emq = Emq_Api(args.emqx_url, args.appid, args.app_secret)
+    brokers = emq.get_info("brokers")
+    if brokers["code"] != 0:
+        print("请检查emqx_url、appid和app_secret是否正确,详细可以使用-h或者--help查看")
+        sys.exit(1)
+    # app.run(host=args.host,debug=args.debug,port=args.port)
+    app.run(host=args.host,debug=True,port=args.port)
