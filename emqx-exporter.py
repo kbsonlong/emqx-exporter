@@ -13,8 +13,7 @@ from prometheus_client.core import GaugeMetricFamily, REGISTRY
 
 hostname = socket.gethostname()
 ip = socket.gethostbyname(hostname)
-# DEBUG = int(os.environ.get('DEBUG', '0'))
-DEBUG = True
+DEBUG = int(os.environ.get('DEBUG', '0'))
 COLLECTION_TIME = Summary('emqx_collector_collect_seconds', 'Time spent to collect metrics from Emqx')
 
 class MqttCollector(object):
@@ -84,7 +83,6 @@ class MqttCollector(object):
             # params = tree: jobs[name,lastBuild[number,timestamp,duration,actions[queuingDurationMillis...
 
             result = get_info(node_url)
-            print(node_url)
             nodes = {}
             for node in result['data']:
                 stat_url = "{}/api/v3/nodes/{}/stats".format(self._target,node["node"])
@@ -136,7 +134,7 @@ def parse_args():
         metavar='emqx',
         required=False,
         help='EMQX集群服务地址，默认为http://127.0.0.1:18083',
-        default=os.environ.get('EMQX_URL', 'http://47.98.236.113:18083')
+        default=os.environ.get('EMQX_URL', 'http://127.0.0.1:18083')
     )
     parser.add_argument(
         '--model', '-m', default="dashboard",
