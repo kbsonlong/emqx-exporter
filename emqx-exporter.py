@@ -108,7 +108,7 @@ class MqttCollector(object):
             snake_case = status.replace("/","_").lower()
             self._prometheus_metrics[status] = {
                 'number':
-                    GaugeMetricFamily('{0}'.format(snake_case),
+                    GaugeMetricFamily('emq_{0}'.format(snake_case),
                                       'EMQX Cluster Metric for  {0}'.format(status), labels=["cluster_node","instance","hostname"]),
             }
 
