@@ -1,138 +1,215 @@
-# -*- coding: utf-8 -*-
-# @Time    : 2019-11-11 11:34
-# @Author  : kbsonlong
-# @Email   : kbsonlong@gmail.com
-# @Blog    : www.alongparty.cn
-# @File    : push01.py
-# @Software: PyCharm
-# @Readme  : emqx指标采集
+#!/usr/bin/python
 
+import time
 import requests
 import argparse
 import socket
-import sys
-import prometheus_client
-from requests.exceptions import ConnectionError
-from prometheus_client.core import CollectorRegistry
-from prometheus_client import Gauge
-from flask import Response, Flask
+import os
+from sys import exit
+from pprint import pprint
+from prometheus_client import start_http_server, Summary
+from prometheus_client.core import GaugeMetricFamily, REGISTRY
 
 
+hostname = socket.gethostname()
+ip = socket.gethostbyname(hostname)
+DEBUG = int(os.environ.get('DEBUG', '0'))
 
-class Emq_Api(object):
-    def __init__(self,url,username,password):
-        self.__url = url
-        self.__username = username
-        self.__password = password
+COLLECTION_TIME = Summary('emqx_collector_collect_seconds', 'Time spent to collect metrics from Emqx')
+
+class MqttCollector(object):
+    # The build statuses we want to export about.
+    statuses = [  'node_status',
+                'subscriptions/shared/max', 'subscriptions/max', 'subscribers/max', 'resources/max',
+                'topics/count', 'subscriptions/count', 'suboptions/max', 'topics/max', 'sessions/persistent/max',
+                'connections/max', 'subscriptions/shared/count', 'sessions/persistent/count', 'actions/count',
+                'retained/count', 'rules/count', 'routes/count', 'suboptions/count', 'sessions/count',
+                'actions/max', 'retained/max', 'sessions/max', 'rules/max', 'routes/max', 'resources/count',
+                'subscribers/count', 'connections/count', 'packets/pubcomp/received', 'packets/unsuback',
+                'packets/pingreq', 'packets/disconnect/received', 'messages/qos0/received', 'packets/pubrel/missed',
+                'packets/puback/missed', 'messages/qos2/dropped', 'packets/subscribe', 'packets/pubrel/sent',
+                'packets/auth', 'packets/unsubscribe', 'messages/forward', 'packets/received', 'packets/disconnect/sent',
+                'bytes/received', 'messages/qos2/received', 'packets/puback/sent', 'messages/dropped', 'packets/connect',
+                'packets/suback', 'bytes/sent', 'messages/qos2/expired', 'packets/puback/received', 'messages/qos2/sent',
+                'packets/pubrel/received', 'messages/expired', 'packets/pingresp', 'messages/qos1/sent',
+                'packets/pubcomp/missed', 'messages/qos1/received', 'packets/pubrec/sent', 'packets/connack',
+                'packets/pubrec/missed', 'packets/publish/received', 'packets/publish/sent', 'packets/sent',
+                'messages/sent', 'messages/received', 'messages/retained', 'packets/pubcomp/sent',
+                'messages/qos0/sent', 'packets/pubrec/received'
+                ]
+
+    def __init__(self, target, user, password):
+        self._target = target.rstrip("/")
+        self._user = user
+        self._password = password
         self.session = requests.Session()
 
+    def collect(self):
+
+        # Request data from Jenkins
+        nodes = self._request_data("brokers")
+
+        self._setup_empty_prometheus_metrics()
+        for node in nodes.keys():
+            if DEBUG:
+                print("Found Job: {}".format(node))
+                pprint(nodes[node])
+            self._get_metrics(node, nodes[node])
+
+        for status in self.statuses:
+            for metric in self._prometheus_metrics[status].values():
+                yield metric
 
 
-    def get_info(self,info):
+    def _request_data(self,info):
+        # Request exactly the information we need from Jenkins
+        url = '{}/api/v3/{}'.format(self._target,info)
 
-        try:
-            response = self.session.get(
-                self.__url + "/api/v3/{}".format(info), auth=(self.__username, self.__password),
-                                        timeout=10).json()
-        except ConnectionError:
-            response = {"code":500,"data":"请求超时，请检查服务url、appid和app秘钥"}
-        return response
-
-
-    def aggre_group(self):
-        stats = self.get_info('stats')
-        metrics = self.get_info('metrics')
-        nodes = []
-        for stat in stats["data"]:
-            for metric in metrics["data"]:
-                if stat["node"] == metric["node"]:
-                    node = self.get_info("nodes/{}".format(stat["node"]))["data"]
-                    if node["node_status"] == "Running":
-                        node_status = 0
-                    else:
-                        node_status = 1
-                    new_nodes = {
-                        "connections": node["connections"],
-                        "load1": float(node["load1"]),
-                        "load15": float(node["load5"]),
-                        "load5": float(node["load15"]),
-                        "max_fds": node["max_fds"],
-                        "memory_total": node["memory_total"],
-                        "memory_used": node["memory_used"],
-                        "node_status": int(node_status),
-                        "process_available": node["process_available"],
-                        "process_used": node["process_used"]
-                    }
-                    new_metrics = metric['metrics']
-                    new_metrics.update(stat)
-                    new_metrics.update(new_nodes)
-                    nodes.append(new_metrics)
-        return nodes
+        def get_info(myurl):
+            try:
+                response = self.session.get(myurl, auth=(self._user, self._password), timeout=10)
+            except  :
+                raise Exception("Call to url %s failed with status: %s" % (myurl, 500))
+            if DEBUG:
+                pprint(response.text)
+            if response.status_code != requests.codes.ok:
+                raise Exception("Call to url %s failed with status: %s" % (myurl, response.status_code))
+            result = response.json()
+            if DEBUG:
+                pprint(result)
+            return result
 
 
-app = Flask(__name__)
+        def parsenodes(node_url):
+            # params = tree: jobs[name,lastBuild[number,timestamp,duration,actions[queuingDurationMillis...
+
+            result = get_info(node_url)
+            nodes = {}
+            for node in result['data']:
+                stat_url = "{}/api/v3/nodes/{}/stats".format(self._target,node["node"])
+                metric_url = "{}/api/v3/nodes/{}/metrics".format(self._target,node["node"])
+                node_stats = get_info(stat_url)["data"]
+                node_metrics = get_info(metric_url)["data"]
+                node.update(node_stats)
+                node.update(node_metrics)
+                nodes[node["node"]]=node
+            if DEBUG:
+                print(nodes)
+            return nodes
 
 
-@app.route("/metrics")
-def collection_metrics():
-    hostname = socket.gethostname()
-    ip = socket.gethostbyname(hostname)
+        return parsenodes(url)
 
-    metrics = emq.aggre_group()
-    for item in metrics:
-        names = locals()
-        for k, v in item.items():
-            name = k.replace('/', '_')
-            if not names.get(name):
-                names[name] = Gauge(name, 'node', ['name', 'instance', 'hostname', 'job'], registry=REGISTRY)
-            else:
-                names[name] = names.get(name)
-            if k != "node":
-                names[name].labels(name=name, instance=item["node"], hostname=hostname,
-                                   job="{}:{}".format(ip, args.port)).inc(v)
-    return Response(prometheus_client.generate_latest(REGISTRY),
-                    mimetype="text/plain")
+    def _setup_empty_prometheus_metrics(self):
+        # The metrics we want to export.
+        self._prometheus_metrics = {}
+        for status in self.statuses:
+            snake_case = status.replace("/","_").lower()
+            self._prometheus_metrics[status] = {
+                'number':
+                    GaugeMetricFamily('{0}'.format(snake_case),
+                                      'EMQX Cluster Metric for  {0}'.format(status), labels=["cluster_node","instance","hostname"]),
+            }
+
+    def _get_metrics(self, name, job):
+        for status in self.statuses:
+            if status in job.keys():
+                status_data = job[status] or 0
+                if status == "node_status" and status_data == "Running":
+                    self._prometheus_metrics[status]["number"].add_metric([name,ip,hostname], 0)
+                elif  status == "node_status":
+                    self._prometheus_metrics[status]["number"].add_metric([name,ip,hostname], 1)
+                else:
+                    self._prometheus_metrics[status]["number"].add_metric([name,ip,hostname],status_data)
 
 
 
-@app.route('/')
-def index():
 
-    return '''<h1> EMQX exporter</h1>
-    <a href="/metrics" class="sidebar-toggle" data-toggle="push-menu" role="button">/metrics</a>'''
+def parse_args():
+    parser = argparse.ArgumentParser(
+        description='emqx exporter args emqx address and port'
+    )
+    parser.add_argument('--verbose', '-v', action='store_true', help='verbose mode')
+    parser.add_argument(
+         '--emqx_url',
+        metavar='emqx',
+        required=False,
+        help='EMQX集群服务地址，默认为http://127.0.0.1:18083',
+        default=os.environ.get('EMQX_URL', 'http://47.98.236.113:18083')
+    )
+    parser.add_argument(
+        '--model', '-m', default="dashboard",
+        help="""两种认证模式:
+dashboard
+--appid  用户名，默认为admin \n
+--app_secret 用户密码,默认为public; \n
+management \n
+--appid  APPID  必填 \n
+--app_secret APP秘钥 必填 \n
+默认为dashboard"""
+    )
+    parser.add_argument(
+        '-p', '--port',
+        metavar='port',
+        required=False,
+        type=int,
+        help='Listen to this port',
+        default=int(os.environ.get('PORT', '9118'))
+    )
+    parser.add_argument(
+        '-i', '--host',
+        dest='host',
+        required=False,
+        help='Listen to this addr',
+        default="127.0.0.1"
+    )
+    if parser.parse_args().model == "management":
+        parser.add_argument(
+            '--appid',
+            metavar='appid',
+            required=True,
+            help='Emqx集群appid,可以通过设置环境变量APPID',
+            default=os.environ.get('APPID')
+        )
+        parser.add_argument(
+            '--app_secret',
+            metavar='app_secret',
+            required=True,
+            help='EMQX集群秘钥,可以通过设置环境变量APP_SECRET',
+            default=os.environ.get('APP_SECRET')
+        )
+    elif parser.parse_args().model == "dashboard":
+        parser.add_argument(
+            '--appid',
+            metavar='appid',
+            required=False,
+            help='Emqx集群appid,默认为admin',
+            default=os.environ.get('APPID','admin')
+        )
+        parser.add_argument(
+            '--app_secret',
+            metavar='app_secret',
+            required=False,
+            help='EMQX集群秘钥,默认为public',
+            default=os.environ.get('APP_SECRET','public')
+        )
+
+    return parser.parse_args()
+
+
+def main():
+    try:
+        args = parse_args()
+        port = int(args.port)
+        REGISTRY.register(MqttCollector(args.emqx_url, args.appid, args.app_secret))
+        start_http_server(port)
+        print("Polling {}. Serving at {}:{}".format(args.emqx_url, args.host,port))
+        while True:
+            time.sleep(1)
+    except KeyboardInterrupt:
+        print(" Interrupted")
+        exit(0)
+
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="EMQX exporter")
-    parser.add_argument('--verbose', '-v', action='store_true', help='verbose mode')
-    # parser.add_argument('--config', '-c', default="config.yaml" , help="配置文件")
-    parser.add_argument('--host', default="127.0.0.1",  help="服务监听地址")
-    parser.add_argument('--port', '-p', default=5001,  help="服务监听端口")
-    parser.add_argument('--debug', '-d', default=False,  help="开启debug模式,默认关闭")
-    parser.add_argument('--model', '-m', default="dashboard",  help="""两种认证模式:
-    dashboard \n
-        --appid  用户名，默认为admin \n
-        --app_secret 用户密码,默认为public; \n
-    management \n
-        --appid  APPID  必填 \n
-        --app_secret APP秘钥 必填 \n
-    默认为dashboard"""
-                        )
-    parser.add_argument('--emqx_url', default="http://127.0.0.1:18083",  help="""默认为http://127.0.0.1:18083""")
-    if parser.parse_args().model == "management":
-        parser.add_argument('--appid', required=True, help="AppID,默认admin")
-        parser.add_argument('--app_secret', required=True, help="App秘钥,默认public")
-    elif parser.parse_args().model == "dashboard":
-        parser.add_argument('--appid', default="admin", help="AppID,默认admin")
-        parser.add_argument('--app_secret', default="public", help="App秘钥,默认public")
-
-    args = parser.parse_args()
-
-
-    REGISTRY = CollectorRegistry(auto_describe=False)
-    emq = Emq_Api(args.emqx_url, args.appid, args.app_secret)
-    brokers = emq.get_info("brokers")
-    if brokers["code"] != 0:
-        print("请检查emqx_url、appid和app_secret是否正确,详细可以使用-h或者--help查看")
-        sys.exit(1)
-    # app.run(host=args.host,debug=args.debug,port=args.port)
-    app.run(host=args.host,debug=True,port=args.port)
+    main()
