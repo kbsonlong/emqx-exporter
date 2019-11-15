@@ -135,7 +135,7 @@ def parse_args():
         metavar='emqx',
         required=False,
         help='EMQX集群服务地址，默认为http://127.0.0.1:18083',
-        default=os.environ.get('EMQX_URL', 'http://47.98.236.113:18083')
+        default=os.environ.get('EMQX_URL', 'http://127.0.0.1:18083')
     )
     parser.add_argument(
         '--model', '-m', default="dashboard",
